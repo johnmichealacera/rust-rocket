@@ -1,13 +1,18 @@
 use axum::http::{self};
 use axum::response::IntoResponse;
+use axum::routing::post;
 use axum::{
-    routing::get, Router
+    routing::get, Router,
+    extract::Json,
 };
 use mongodb::{Client, options::ClientOptions, Database, error::Error};
 use dotenv::dotenv;
+use tokio::net::TcpListener;
 use std::env;
 use std::sync::{Arc, Mutex};
 use serde_json::Value;
+use axum::extract::Path;
+use serde::{Deserialize, Serialize};
 
 #[tokio::main]
 async fn main() {
@@ -15,14 +20,79 @@ async fn main() {
     dotenv().ok();
     // build our application with a route
     let app = Router::new()
-        // `GET /` goes to `root`
         .route("/", get(root))
-        // .route("/handler", get(handler))
+        .route("/user/:users", get(root_param))
+        .route("/json", post(create_introduction))
+        // .route("/json", post(insert_introductions))
         .route("/jm", get(get_jm));
-
-    // run our app with hyper, listening globally on port 3000
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let axum_address = env::var("AXUM_ADDRESS").expect("AXUM_ADDRESS must be set");
+    let app_port = env::var("PORT").expect("PORT must be set");
+    let axum_listener_address = format!("{}:{}", axum_address, app_port);
+    let listener = TcpListener::bind(&axum_listener_address).await.expect("Failed to bind to address");
     axum::serve(listener, app).await.unwrap();
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Introduction {
+    title: String,
+    icon: String,
+}
+
+async fn create_introduction(Json(payload): Json<Introduction>) -> impl IntoResponse {
+    println!("I am here");
+    println!("{:?}", payload);
+    // Create a new MongoConnection instance
+    let connection_result = MongoConnection::new().await;
+    match connection_result {
+        Ok(connection) => {
+            // Connection successful, use the connection object here
+            println!("Connected to MongoDB");
+            // Example usage: Get a handle to a database
+            let db = connection.db("personal");
+            // Retrieve all collection names in the database
+            match db.list_collection_names(None).await {
+                Ok(collections) => {
+                    println!("Available collections:");
+                    for collection_name in collections {
+                        println!("{}", collection_name);
+                    }
+                }
+                Err(err) => eprintln!("Error listing collections: {}", err),
+            }
+            match insert_introductions(&db, "introductions", payload).await {
+                Ok(()) => {
+                    axum::http::Response::builder()
+                        .status(http::StatusCode::OK)
+                        .body(axum::body::Body::from("Inserted successfully"))
+                        .unwrap()
+                }
+                Err(err) => {
+                    // Handle error from find_all
+                    eprintln!("Error finding documents: {}", err);
+                    // Return an error response
+                    axum::http::Response::builder()
+                        .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                        .body("Error retrieving data".into())
+                        .unwrap()
+                }
+            }
+        }
+        Err(e) => {
+            // Handle connection error
+            eprintln!("Error connecting to MongoDB: {}", e);
+            // Return an error response
+            axum::http::Response::builder()
+                .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                .body("Error connecting to MongoDB".into())
+                .unwrap()
+        }
+    }
+}
+
+// basic handler that responds with a static string
+async fn root_param(Path(id): Path<u64>) -> String {
+    println!("{}", id);
+    format!("Hello, JM AAcera man param with ID: {}", id)
 }
 
 // basic handler that responds with a static string
@@ -30,33 +100,6 @@ async fn root() -> &'static str {
     "Hello, JM AAcera man!"
 }
 
-// async fn get_jm() -> &'static str {
-//     // Create a new MongoConnection instance
-//     let connection_result = MongoConnection::new().await;
-//     match connection_result {
-//         Ok(connection) => {
-//             // Connection successful, use the connection object here
-//             println!("Connected to MongoDB");
-//             // Example usage: Get a handle to a database
-//             let db = connection.db("personal");
-//             // Retrieve all collection names in the database
-//             match db.list_collection_names(None).await {
-//                 Ok(collections) => {
-//                     println!("Available collections:");
-//                     for collection_name in collections {
-//                         println!("{}", collection_name);
-//                     }
-//                 }
-//                 Err(err) => eprintln!("Error listing collections: {}", err),
-//             }
-//             if let Err(err) = find_all(&db, "introductions").await {
-//                 eprintln!("Error finding documents: {}", err);
-//             }
-//         }
-//         Err(e) => eprintln!("Error connecting to MongoDB: {}", e),
-//     }
-//     "Hello, JM is a new endpoint"
-// }
 
 async fn get_jm() -> impl IntoResponse {
     // Create a new MongoConnection instance
@@ -111,6 +154,11 @@ async fn get_jm() -> impl IntoResponse {
     }
 }
 
+async fn insert_introductions(db: &Database, collection_name: &str, data: Introduction) -> Result<(), mongodb::error::Error> {
+    let collection: mongodb::Collection<Introduction> = db.collection(collection_name);
+    collection.insert_one(data, None).await?;
+    Ok(())
+}
 
 async fn find_all(db: &Database, collection_name: &str) -> Result<Vec<Value>, mongodb::error::Error> {
     let collection: mongodb::Collection<Value> = db.collection(collection_name);
